@@ -1,0 +1,15 @@
+# Secrets - DO NOT COMMIT
+secrets.py
+settings.toml
+
+# CircuitPython compiled files
+*.mpy
+lib/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
