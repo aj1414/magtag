@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 # pylint: disable=redefined-outer-name, wrong-import-order, unsubscriptable-object
 
+import gc
 import time
 import alarm
 import board
@@ -357,13 +358,16 @@ def get_greenhouse_status():
     if not GREENHOUSE_API_URL:
         return None
 
-    try:
-        print(f"Fetching greenhouse status from {GREENHOUSE_API_URL}")
-        resp = magtag.network.fetch(GREENHOUSE_API_URL)
-        return resp.json()
-    except (RuntimeError, OSError) as error:
-        print(f"Error fetching greenhouse status: {error}")
-        return None
+    for attempt in range(3):
+        try:
+            print(f"Fetching greenhouse status (attempt {attempt + 1})...")
+            resp = magtag.network.fetch(GREENHOUSE_API_URL)
+            return resp.json()
+        except (RuntimeError, OSError) as error:
+            print(f"Attempt {attempt + 1} failed: {error}")
+            gc.collect()
+            time.sleep(2)
+    return None
 
 
 def make_greenhouse_banner(x=0, y=0):
@@ -416,12 +420,16 @@ def get_plug_status():
     """Fetch smart plug status from local API server."""
     if not GREENHOUSE_PLUGS_API_URL:
         return None
-    try:
-        resp = magtag.network.fetch(GREENHOUSE_PLUGS_API_URL)
-        return resp.json()
-    except (RuntimeError, OSError) as error:
-        print(f"Error fetching plug status: {error}")
-        return None
+    for attempt in range(3):
+        try:
+            print(f"Fetching plug status (attempt {attempt + 1})...")
+            resp = magtag.network.fetch(GREENHOUSE_PLUGS_API_URL)
+            return resp.json()
+        except (RuntimeError, OSError) as error:
+            print(f"Plug attempt {attempt + 1} failed: {error}")
+            gc.collect()
+            time.sleep(2)
+    return None
 
 
 def make_plug_banner(x=0, y=0):
@@ -713,19 +721,24 @@ if GREENHOUSE_ENABLED:
 voltage = magtag.peripherals.battery
 
 print("Fetching forecast...")
+forecast_data = None
 try:
     resp_data = get_forecast()
     forecast_data = resp_data.json()
 except (RuntimeError, OSError, KeyError) as error:
     print(f"Error getting forecast: {error}")
-    # Sleep and try again later
-    go_to_sleep_with_alarms()
+gc.collect()
 
 if voltage > BATTERY_MINIMUM_VOLTAGE:
 
-    print("Updating...")
-    update_today(forecast_data)
-    update_future(forecast_data)
+    if forecast_data:
+        print("Updating...")
+        update_today(forecast_data)
+        update_future(forecast_data)
+
+    # Free sockets after weather fetch
+    gc.collect()
+    time.sleep(1)
 
     # Fetch and update greenhouse status
     if GREENHOUSE_ENABLED:
@@ -736,6 +749,8 @@ if voltage > BATTERY_MINIMUM_VOLTAGE:
         except Exception as error:
             print(f"Greenhouse status error: {error}")
             update_greenhouse_status(gh_banner, None)
+        gc.collect()
+        time.sleep(1)
 
     # Fetch and update plug status
     if GREENHOUSE_ENABLED and plug_banner:
@@ -745,6 +760,8 @@ if voltage > BATTERY_MINIMUM_VOLTAGE:
         except Exception as error:
             print(f"Plug status error: {error}")
             update_plug_status(plug_banner, None)
+        gc.collect()
+        time.sleep(1)
 
     # Fetch and update EV status
     if EV_ENABLED:

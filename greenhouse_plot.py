@@ -57,7 +57,7 @@ def show(magtag, url, refresh_delay):
     # Display is 296 x 128
     PLOT_X = 22       # left edge of plot (room for Y-axis labels)
     PLOT_Y = 16       # top edge of plot (room for title/stats row)
-    PLOT_W = 240      # plot bitmap width
+    PLOT_W = 215      # plot bitmap width (narrower to fit current values on right)
     PLOT_H = 90       # plot bitmap height
 
     # --- Determine Y-axis ranges ---
@@ -188,30 +188,60 @@ def show(magtag, url, refresh_delay):
     yb_lbl.anchored_position = (PLOT_X - 2, PLOT_Y + PLOT_H)
     plot_group.append(yb_lbl)
 
-    # Y-axis labels (right side = humidity)
+    # Y-axis labels (right side = humidity) - far right
     hr_lbl = label.Label(terminalio.FONT, text="100%", color=0x555555)
-    hr_lbl.anchor_point = (0, 0)
-    hr_lbl.anchored_position = (PLOT_X + PLOT_W + 2, PLOT_Y)
+    hr_lbl.anchor_point = (1, 0)
+    hr_lbl.anchored_position = (294, PLOT_Y)
     plot_group.append(hr_lbl)
 
     hb_lbl = label.Label(terminalio.FONT, text="0%", color=0x555555)
-    hb_lbl.anchor_point = (0, 1)
-    hb_lbl.anchored_position = (PLOT_X + PLOT_W + 2, PLOT_Y + PLOT_H)
+    hb_lbl.anchor_point = (1, 1)
+    hb_lbl.anchored_position = (294, PLOT_Y + PLOT_H)
     plot_group.append(hb_lbl)
 
-    # X-axis time labels
-    x_labels = ["24h", "18h", "12h", "6h", "now"]
-    for i, txt in enumerate(x_labels):
+    # X-axis time labels (actual clock hours)
+    now_hour = time.localtime().tm_hour
+    for i in range(5):
+        hours_ago = 24 - i * 6  # 24, 18, 12, 6, 0
+        if hours_ago == 0:
+            txt = "now"
+        else:
+            h = (now_hour - hours_ago) % 24
+            suffix = "a" if h < 12 else "p"
+            h12 = h % 12
+            if h12 == 0:
+                h12 = 12
+            txt = "{}{}".format(h12, suffix)
         xl = label.Label(terminalio.FONT, text=txt, color=0x000000)
         xl.anchor_point = (0.5, 0)
         xl.anchored_position = (PLOT_X + (i * (PLOT_W - 1)) // 4, PLOT_Y + PLOT_H + 2)
         plot_group.append(xl)
 
-    # Legend
-    leg_lbl = label.Label(terminalio.FONT, text="-- Temp(F)   .. Humid(%)", color=0x000000)
-    leg_lbl.anchor_point = (0.5, 1)
-    leg_lbl.anchored_position = (148, 126)
-    plot_group.append(leg_lbl)
+    # Current temp/humidity values - next to last data point
+    cur_temp = temp_data[-1]
+    cur_humid = humid_data[-1]
+    label_x = PLOT_X + PLOT_W + 2  # just right of plot area
+
+    cur_t_py = PLOT_Y + PLOT_H - 1 - int((cur_temp - t_lo) / (t_hi - t_lo) * (PLOT_H - 1))
+    cur_t_py = max(PLOT_Y, min(PLOT_Y + PLOT_H - 1, cur_t_py))
+    cur_h_py = PLOT_Y + PLOT_H - 1 - int((cur_humid - h_lo) / (h_hi - h_lo) * (PLOT_H - 1))
+    cur_h_py = max(PLOT_Y, min(PLOT_Y + PLOT_H - 1, cur_h_py))
+
+    # If labels would overlap (within 10px), spread them apart
+    if abs(cur_t_py - cur_h_py) < 10:
+        mid = (cur_t_py + cur_h_py) // 2
+        cur_t_py = mid - 6
+        cur_h_py = mid + 6
+
+    ct_lbl = label.Label(terminalio.FONT, text="{:.0f}F".format(cur_temp), color=0x000000)
+    ct_lbl.anchor_point = (0, 0.5)
+    ct_lbl.anchored_position = (label_x, cur_t_py)
+    plot_group.append(ct_lbl)
+
+    ch_lbl = label.Label(terminalio.FONT, text="{:.0f}%".format(cur_humid), color=0x555555)
+    ch_lbl.anchor_point = (0, 0.5)
+    ch_lbl.anchored_position = (label_x, cur_h_py)
+    plot_group.append(ch_lbl)
 
     # --- Refresh display ---
     magtag.display.root_group = plot_group
