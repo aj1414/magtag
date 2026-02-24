@@ -27,3 +27,6 @@ EV_ENABLED = True  # Set to False to disable EV status display
 
 # Greenhouse settings
 GREENHOUSE_ENABLED = True  # Set to False to disable greenhouse status display
+
+# Running stats settings
+RUNNING_ENABLED = True  # Set to False to disable running stats display

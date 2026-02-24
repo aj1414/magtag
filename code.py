@@ -4,6 +4,8 @@
 # pylint: disable=redefined-outer-name, wrong-import-order, unsubscriptable-object
 
 import time
+import alarm
+import board
 import terminalio
 import displayio
 import adafruit_imageload
@@ -22,7 +24,7 @@ try:
     from config import (
         LAT, LON, TMZ, CITY, METRIC, SLEEP_TIME,
         BATTERY_CRITICAL_VOLTAGE, BATTERY_MINIMUM_VOLTAGE,
-        EV_ENABLED, GREENHOUSE_ENABLED
+        EV_ENABLED, GREENHOUSE_ENABLED, RUNNING_ENABLED
     )
 except ImportError:
     print("ERROR: config.py not found! Using defaults.")
@@ -36,10 +38,14 @@ except ImportError:
     BATTERY_MINIMUM_VOLTAGE = 2.0
     EV_ENABLED = False
     GREENHOUSE_ENABLED = False
+    RUNNING_ENABLED = False
 
 # Get API URLs from secrets
 EV_API_URL = secrets.get('ev_api_url', '') if EV_ENABLED else ''
 GREENHOUSE_API_URL = secrets.get('greenhouse_api_url', '') if GREENHOUSE_ENABLED else ''
+GREENHOUSE_HISTORY_API_URL = secrets.get('greenhouse_history_api_url', '') if GREENHOUSE_ENABLED else ''
+GREENHOUSE_PLUGS_API_URL = secrets.get('greenhouse_plugs_api_url', '') if GREENHOUSE_ENABLED else ''
+RUNNING_API_URL = secrets.get('running_api_url', '') if RUNNING_ENABLED else ''
 
 # -------------------------------------------
 # Constants
@@ -131,7 +137,84 @@ WMO_CODE_TO_ICON = (
     (45, 48),  # 8 = fog and stuff
 )
 
+# /////////////////////////////////////////////////////////////////////////
+#  Deep sleep with timer + button wake
+# /////////////////////////////////////////////////////////////////////////
+
+
+def go_to_sleep_with_alarms():
+    """Enter deep sleep with timer and button wake alarms."""
+    print(
+        "Sleeping for {} hours, {} minutes".format(
+            SLEEP_TIME // SECONDS_PER_HOUR,
+            (SLEEP_TIME // SECONDS_PER_MINUTE) % 60
+        )
+    )
+
+    # Disable peripherals to save power
+    magtag.peripherals.neopixel_disable = True
+
+    # Release button pins so they can be used as alarm sources
+    magtag.peripherals.deinit()
+
+    # Wake on timer, D11 (greenhouse plot), D14 (running stats), or D15 (weather refresh)
+    time_alarm = alarm.time.TimeAlarm(monotonic_time=time.monotonic() + SLEEP_TIME)
+    pin_alarm_d11 = alarm.pin.PinAlarm(pin=board.D11, value=False, pull=True)
+    pin_alarm_d14 = alarm.pin.PinAlarm(pin=board.D14, value=False, pull=True)
+    pin_alarm_d15 = alarm.pin.PinAlarm(pin=board.D15, value=False, pull=True)
+
+    alarm.exit_and_deep_sleep_until_alarms(time_alarm, pin_alarm_d11, pin_alarm_d14, pin_alarm_d15)
+
+
+# /////////////////////////////////////////////////////////////////////////
+#  Initialize MagTag and check wake reason
+# /////////////////////////////////////////////////////////////////////////
+
 magtag = MagTag()
+
+# Check what woke us from deep sleep
+wake_alarm = alarm.wake_alarm
+if isinstance(wake_alarm, alarm.pin.PinAlarm) and wake_alarm.pin == board.D11 and GREENHOUSE_ENABLED:
+    print("Woke from button D11 (right) -- showing greenhouse plot")
+    # Warm up network — first fetch after deep sleep initializes socket pool
+    for _attempt in range(5):
+        try:
+            print("Network warm-up (attempt {})...".format(_attempt + 1))
+            resp = magtag.network.fetch(GREENHOUSE_API_URL)
+            resp.close()
+            print("Network ready")
+            break
+        except Exception as e:
+            print("Warm-up attempt {} failed: {}".format(_attempt + 1, e))
+            time.sleep(5)
+    # Lazy-import plot module to save RAM on normal weather path
+    import greenhouse_plot
+    greenhouse_plot.show(magtag, GREENHOUSE_HISTORY_API_URL, DISPLAY_REFRESH_DELAY)
+    go_to_sleep_with_alarms()
+    # Code never reaches here -- deep sleep restarts from beginning
+
+if isinstance(wake_alarm, alarm.pin.PinAlarm) and wake_alarm.pin == board.D14 and RUNNING_ENABLED:
+    print("Woke from button D14 -- showing running stats")
+    # Warm up network — first fetch after deep sleep initializes socket pool
+    for _attempt in range(5):
+        try:
+            print("Network warm-up (attempt {})...".format(_attempt + 1))
+            resp = magtag.network.fetch(RUNNING_API_URL)
+            resp.close()
+            print("Network ready")
+            break
+        except Exception as e:
+            print("Warm-up attempt {} failed: {}".format(_attempt + 1, e))
+            time.sleep(5)
+    # Lazy-import display module to save RAM on normal weather path
+    import running_display
+    running_display.show(magtag, RUNNING_API_URL, DISPLAY_REFRESH_DELAY)
+    go_to_sleep_with_alarms()
+    # Code never reaches here -- deep sleep restarts from beginning
+
+# ----------------------------
+# Normal weather display path
+# ----------------------------
 
 # ----------------------------
 # Background bitmap
@@ -329,6 +412,40 @@ def update_greenhouse_status(gh_banner, data):
         gh_banner[0].text = "GH: --F  --%"
 
 
+def get_plug_status():
+    """Fetch smart plug status from local API server."""
+    if not GREENHOUSE_PLUGS_API_URL:
+        return None
+    try:
+        resp = magtag.network.fetch(GREENHOUSE_PLUGS_API_URL)
+        return resp.json()
+    except (RuntimeError, OSError) as error:
+        print(f"Error fetching plug status: {error}")
+        return None
+
+
+def make_plug_banner(x=0, y=0):
+    """Create display banner for smart plug status."""
+    plug_line = label.Label(terminalio.FONT, text="", color=0x000000)
+    plug_line.anchor_point = (0, 0.5)
+    plug_line.anchored_position = (0, 10)
+    group = displayio.Group(x=x, y=y)
+    group.append(plug_line)
+    return group
+
+
+def update_plug_status(plug_banner, data):
+    """Update plug status on display."""
+    if data is None:
+        plug_banner[0].text = ""
+        return
+    heater = data.get("heater", {})
+    light = data.get("light", {})
+    h_str = "On" if heater.get("on") else "Off"
+    l_str = "On" if light.get("on") else "Off"
+    plug_banner[0].text = f"H:{h_str}  L:{l_str}"
+
+
 def make_banner(x=0, y=0):
     """
     Create a display banner for future forecast information.
@@ -483,24 +600,6 @@ def update_future(data):
         banner[2].text = temperature_text(temp_max) + temperature_text(temp_min)
 
 
-def go_to_sleep(current_time_secs):
-    """
-    Enter deep sleep mode until the configured wake time.
-
-    Args:
-        current_time_secs: Current time in seconds since midnight
-    """
-    # Use configured sleep time from config.py
-    print(
-        "Sleeping for {} hours, {} minutes".format(
-            SLEEP_TIME // SECONDS_PER_HOUR,
-            (SLEEP_TIME // SECONDS_PER_MINUTE) % 60
-        )
-    )
-
-    magtag.exit_and_deep_sleep(SLEEP_TIME)
-
-
 # ===========
 # U I
 # ===========
@@ -582,14 +681,14 @@ future_banners = [
 # Greenhouse status banner (single line)
 gh_banner = None
 if GREENHOUSE_ENABLED:
-    gh_banner = make_greenhouse_banner(x=FUTURE_BANNER_LEFT, y=60)
+    gh_banner = make_greenhouse_banner(x=FUTURE_BANNER_LEFT, y=57)
 
 # EV status banners
 ev_battery_banner = None
 ev_charge_banner = None
 if EV_ENABLED:
-    ev_battery_banner = make_ev_banner(x=FUTURE_BANNER_LEFT, y=81)
-    ev_charge_banner = make_ev_banner(x=FUTURE_BANNER_LEFT, y=102)
+    ev_battery_banner = make_ev_banner(x=FUTURE_BANNER_LEFT, y=72)
+    ev_charge_banner = make_ev_banner(x=FUTURE_BANNER_LEFT, y=87)
 
 magtag.splash.append(today_banner)
 for future_banner in future_banners:
@@ -601,6 +700,12 @@ if GREENHOUSE_ENABLED and gh_banner:
 if EV_ENABLED and ev_battery_banner and ev_charge_banner:
     magtag.splash.append(ev_battery_banner)
     magtag.splash.append(ev_charge_banner)
+
+# Plug status banner
+plug_banner = None
+if GREENHOUSE_ENABLED:
+    plug_banner = make_plug_banner(x=FUTURE_BANNER_LEFT, y=102)
+    magtag.splash.append(plug_banner)
 
 # ===========
 #  M A I N
@@ -614,7 +719,7 @@ try:
 except (RuntimeError, OSError, KeyError) as error:
     print(f"Error getting forecast: {error}")
     # Sleep and try again later
-    magtag.exit_and_deep_sleep(SLEEP_TIME)
+    go_to_sleep_with_alarms()
 
 if voltage > BATTERY_MINIMUM_VOLTAGE:
 
@@ -631,6 +736,15 @@ if voltage > BATTERY_MINIMUM_VOLTAGE:
         except Exception as error:
             print(f"Greenhouse status error: {error}")
             update_greenhouse_status(gh_banner, None)
+
+    # Fetch and update plug status
+    if GREENHOUSE_ENABLED and plug_banner:
+        try:
+            plug_data = get_plug_status()
+            update_plug_status(plug_banner, plug_data)
+        except Exception as error:
+            print(f"Plug status error: {error}")
+            update_plug_status(plug_banner, None)
 
     # Fetch and update EV status
     if EV_ENABLED:
@@ -668,8 +782,7 @@ else:
             time.sleep(LED_FLASH_INTERVAL)
 
         print("Battery critical! Sleeping immediately...")
-        # Go to deep sleep immediately to conserve power
-        magtag.exit_and_deep_sleep(SLEEP_TIME)
+        go_to_sleep_with_alarms()
     else:
         # Low battery - show brief color cycle then continue to sleep
         magtag.peripherals.neopixel_disable = False
@@ -684,15 +797,6 @@ else:
         magtag.peripherals.neopixel_disable = True
 
 print("Sleeping...")
-try:
-    # Parse current time from response headers
-    time_parts = resp_data.headers["date"].split(" ")[4].split(":")
-    hours, minutes, seconds = (int(t) for t in time_parts)
-    current_time_secs = (hours * SECONDS_PER_HOUR) + (minutes * SECONDS_PER_MINUTE) + seconds
-    current_time_secs += forecast_data["utc_offset_seconds"]
-    go_to_sleep(current_time_secs)
-except (KeyError, ValueError, IndexError) as error:
-    print(f"Error parsing time, using default sleep: {error}")
-    magtag.exit_and_deep_sleep(SLEEP_TIME)
+go_to_sleep_with_alarms()
 
 # Entire code will run again after deep sleep cycle (similar to hitting the reset button)
