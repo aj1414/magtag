@@ -16,10 +16,9 @@ from adafruit_magtag.magtag import MagTag
 # Import configuration and secrets
 try:
     from secrets import secrets
-    APPID = secrets.get('openweather_token', '')
 except ImportError:
     print("ERROR: secrets.py not found!")
-    APPID = ""
+    secrets = {}
 
 try:
     from config import (
@@ -233,27 +232,6 @@ icons_small_bmp, icons_small_pal = adafruit_imageload.load(ICONS_SMALL_FILE)
 # /////////////////////////////////////////////////////////////////////////
 
 
-def get_current():
-    """
-    Fetch current weather data from OpenWeatherMap API.
-
-    Returns:
-        Response object containing current weather data
-
-    Raises:
-        RuntimeError: If network request fails
-    """
-    url = "https://api.openweathermap.org/data/3.0/onecall"
-    url += f"?lat={LAT}&lon={LON}&appid={APPID}"
-
-    try:
-        resp = magtag.network.fetch(url)
-        return resp
-    except (RuntimeError, OSError) as error:
-        print(f"Error fetching current weather: {error}")
-        raise
-
-
 def get_forecast():
     """
     Fetch weather forecast data from Open-Meteo API.
@@ -265,6 +243,7 @@ def get_forecast():
         RuntimeError: If network request fails
     """
     url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&"
+    url += "current=temperature_2m,relative_humidity_2m&"
     url += "daily=weather_code,temperature_2m_max,temperature_2m_min"
     url += ",sunrise,sunset,wind_speed_10m_max,wind_direction_10m_dominant"
     url += "&timeformat=unixtime"
@@ -612,30 +591,12 @@ def update_future(data):
 # U I
 # ===========
 
-print("Fetching current...")
-try:
-    resp_data = get_current()
-    current_data = resp_data.json()
-    current_temp_F = 9 / 5 * (current_data["current"]["temp"] - 273.15) + 32
-    current_humidity = current_data["current"]["humidity"]
-except (RuntimeError, OSError, KeyError) as error:
-    print(f"Error getting current weather: {error}")
-    # Set defaults if fetch fails
-    current_temp_F = 0
-    current_humidity = 0
-
 today_date = label.Label(terminalio.FONT, text="?" * 30, color=0x000000)
 today_date.anchor_point = (0, 0)
 today_date.anchored_position = (DATE_POSITION_X, DATE_POSITION_Y)
 
 location_name = label.Label(terminalio.FONT, color=0x000000)
-if CITY:
-    location_name.text = f"{CITY[:16]} Temp: "
-    location_name.text += f"{current_temp_F:.1f} "
-    location_name.text += "Humid: "
-    location_name.text += f"{current_humidity:.1f}"
-else:
-    location_name.text = f"({LAT},{LON})"
+location_name.text = f"{CITY[:16]}" if CITY else f"({LAT},{LON})"
 
 location_name.anchor_point = (0, 0)
 location_name.anchored_position = (LOCATION_POSITION_X, LOCATION_POSITION_Y)
@@ -733,6 +694,19 @@ if voltage > BATTERY_MINIMUM_VOLTAGE:
 
     if forecast_data:
         print("Updating...")
+
+        # Extract current weather from Open-Meteo response
+        try:
+            current_temp_C = forecast_data["current"]["temperature_2m"]
+            current_temp_F = current_temp_C * 9 / 5 + 32
+            current_humidity = forecast_data["current"]["relative_humidity_2m"]
+            if CITY:
+                location_name.text = f"{CITY[:16]} Temp: {current_temp_F:.1f} Humid: {current_humidity:.0f}"
+            else:
+                location_name.text = f"({LAT},{LON})"
+        except (KeyError, TypeError) as error:
+            print(f"Error parsing current weather: {error}")
+
         update_today(forecast_data)
         update_future(forecast_data)
 
