@@ -271,7 +271,9 @@ def get_ev_status():
     try:
         print(f"Fetching EV status from {EV_API_URL}")
         resp = magtag.network.fetch(EV_API_URL)
-        return resp.json()
+        data = resp.json()
+        resp.close()
+        return data
     except (RuntimeError, OSError) as error:
         print(f"Error fetching EV status: {error}")
         return None
@@ -341,11 +343,13 @@ def get_greenhouse_status():
         try:
             print(f"Fetching greenhouse status (attempt {attempt + 1})...")
             resp = magtag.network.fetch(GREENHOUSE_API_URL)
-            return resp.json()
-        except (RuntimeError, OSError) as error:
+            data = resp.json()
+            resp.close()
+            return data
+        except Exception as error:
             print(f"Attempt {attempt + 1} failed: {error}")
             gc.collect()
-            time.sleep(2)
+            time.sleep(3)
     return None
 
 
@@ -403,11 +407,13 @@ def get_plug_status():
         try:
             print(f"Fetching plug status (attempt {attempt + 1})...")
             resp = magtag.network.fetch(GREENHOUSE_PLUGS_API_URL)
-            return resp.json()
-        except (RuntimeError, OSError) as error:
+            data = resp.json()
+            resp.close()
+            return data
+        except Exception as error:
             print(f"Plug attempt {attempt + 1} failed: {error}")
             gc.collect()
-            time.sleep(2)
+            time.sleep(3)
     return None
 
 
@@ -681,13 +687,35 @@ if GREENHOUSE_ENABLED:
 # ===========
 voltage = magtag.peripherals.battery
 
+# Reset WiFi radio and reconnect after deep sleep
+import wifi
+print("Resetting WiFi radio...")
+wifi.radio.enabled = False
+time.sleep(2)
+wifi.radio.enabled = True
+time.sleep(2)
+print("Connecting WiFi...")
+try:
+    magtag.network.connect()
+except Exception as e:
+    print(f"WiFi connect error: {e}")
+gc.collect()
+time.sleep(3)
+
 print("Fetching forecast...")
 forecast_data = None
-try:
-    resp_data = get_forecast()
-    forecast_data = resp_data.json()
-except (RuntimeError, OSError, KeyError) as error:
-    print(f"Error getting forecast: {error}")
+for _fc_attempt in range(3):
+    try:
+        print(f"Forecast attempt {_fc_attempt + 1}...")
+        resp_data = get_forecast()
+        forecast_data = resp_data.json()
+        resp_data.close()
+        del resp_data
+        break
+    except (RuntimeError, OSError, KeyError) as error:
+        print(f"Forecast attempt {_fc_attempt + 1} failed: {error}")
+        gc.collect()
+        time.sleep(3)
 gc.collect()
 
 if voltage > BATTERY_MINIMUM_VOLTAGE:
